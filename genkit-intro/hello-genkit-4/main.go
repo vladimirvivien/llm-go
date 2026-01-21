@@ -16,8 +16,7 @@ type Greeting struct {
 	Text     string `json:"text"`
 }
 
-var count = 5
-
+// var count = 5
 func main() {
 	ctx := context.Background()
 
@@ -36,18 +35,20 @@ func main() {
 		ctx,
 		gkx, // Use the configured GenKit context
 		ai.WithModel(gemini),
-		ai.WithPrompt(fmt.Sprintf("Say Hello in %d languages", count)),
+		ai.WithPrompt(fmt.Sprintf("Generate %d greetings in different languages", 10)),
 	)
 
 	for greet, err := range greets {
+		fmt.Printf("Received greeting chunk: %+v\n", greet)
 		if err != nil {
 			log.Fatalf("greet stream: %v", err)
 		}
 		if greet.Done {
 			break
 		}
-		if greet.Chunk.Language != "" {
-			fmt.Printf("Greeting in %s: %s\n", greet.Chunk.Language, greet.Chunk.Text)
-		}
+
+		// if greet.Chunk.Language != "" {
+		// 	fmt.Printf("Greeting in %s: %s\n", greet.Chunk.Language, greet.Chunk.Text)
+		// }
 	}
 }
