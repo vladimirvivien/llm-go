@@ -39,7 +39,7 @@ func main() {
 	// Next, define a Google Gemini model instance to use
 	gemini := googlegenai.GoogleAIModel(gkx, "gemini-3-flash-preview")
 
-	greetFlow := genkit.DefineFlow[*GreetRequest, *GreetResponse](
+	_ = genkit.DefineFlow[*GreetRequest, *GreetResponse](
 		gkx,
 		"greet_flow",
 		func(ctx context.Context, req *GreetRequest) (*GreetResponse, error) {
