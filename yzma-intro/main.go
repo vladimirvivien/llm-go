@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/glamour"
@@ -66,19 +67,29 @@ var (
 	maxTokens   int
 	predictSize int
 	temperature float64
+	nThreads    int
+	nBatch      int
+	flashAttn   bool
+	quantizeKV  bool
+	mlockModel  bool
 )
 
 func main() {
 	// Parse flags
 	home, _ := os.UserHomeDir()
-	defaultModel := filepath.Join(home, "models", "gemma-4-E4B-it-Q8_0.gguf")
+	defaultModel := filepath.Join(home, "models", "gemma-4-E4B-it-Q4_K_M.gguf")
 
 	flag.StringVar(&modelFile, "model", defaultModel, "path to GGUF model file")
 	flag.StringVar(&libPath, "lib", os.Getenv("YZMA_LIB"), "path to llama.cpp compiled library (or set YZMA_LIB)")
 	flag.BoolVar(&verbose, "v", false, "verbose logging")
-	flag.IntVar(&maxTokens, "max-tokens", 4096, "max tokens in context")
-	flag.IntVar(&predictSize, "n", 2048, "max tokens to predict per generation")
+	flag.IntVar(&maxTokens, "max-tokens", 3072, "max tokens in context")
+	flag.IntVar(&predictSize, "n", 1024, "max tokens to predict per generation")
 	flag.Float64Var(&temperature, "temperature", 0.1, "prediction temperature")
+	flag.IntVar(&nThreads, "threads", runtime.NumCPU(), "number of threads for inference (default: all logical cores)")
+	flag.IntVar(&nBatch, "batch", 512, "logical/physical batch size for prefill (smaller is more cache-friendly on older CPUs)")
+	flag.BoolVar(&flashAttn, "flash-attn", false, "enable flash attention (may help or hurt depending on CPU; benchmark both)")
+	flag.BoolVar(&quantizeKV, "quant-kv", false, "use Q8_0 quantized KV cache (independent of model weight quant; lower KV quants would require -flash-attn)")
+	flag.BoolVar(&mlockModel, "mlock", false, "lock model weights in RAM (prevents swapping)")
 	flag.Parse()
 
 	if libPath == "" {
@@ -101,18 +112,42 @@ func main() {
 	defer llama.Close()
 
 	// Load model from model file
-	model, err := llama.ModelLoadFromFile(modelFile, llama.ModelDefaultParams())
+	mParams := llama.ModelDefaultParams()
+	if mlockModel {
+		mParams.UseMlock = 1
+	}
+	model, err := llama.ModelLoadFromFile(modelFile, mParams)
 	if err != nil {
 		slog.Error("Failed to load model", "err", err)
 		os.Exit(1)
 	}
 	defer llama.ModelFree(model)
 
-	// Create context
+	// Create context with performance tuning
 	ctxParams := llama.ContextDefaultParams()
 	ctxParams.NCtx = uint32(maxTokens)
-	ctxParams.NBatch = 2048
-	ctxParams.NUbatch = 2048
+	ctxParams.NBatch = uint32(nBatch)
+	ctxParams.NUbatch = uint32(nBatch)
+	ctxParams.NThreads = int32(nThreads)
+	ctxParams.NThreadsBatch = int32(nThreads)
+	if flashAttn {
+		ctxParams.FlashAttentionType = llama.FlashAttentionTypeEnabled
+	}
+	if quantizeKV {
+		ctxParams.TypeK = llama.GGMLTypeQ8_0
+		ctxParams.TypeV = llama.GGMLTypeQ8_0
+	}
+
+	// Log effective inference configuration so the user can verify what's actually
+	// loaded and tune via flags. The full model file path is included so it's
+	// unambiguous which GGUF quantization is being loaded.
+	slog.Info("inference config",
+		"model", modelFile,
+		"threads", nThreads,
+		"batch", ctxParams.NBatch,
+		"ctx", ctxParams.NCtx,
+		"flash_attn", flashAttn,
+		"quant_kv", quantizeKV)
 
 	ctx, err := llama.InitFromModel(model, ctxParams)
 	if err != nil {
@@ -129,11 +164,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create sampler for model predictions
-	sp := llama.DefaultSamplerParams()
-	sp.Temp = float32(temperature)
-
-	sampler := llama.NewSampler(model, llama.DefaultSamplers, sp)
+	// Create sampler for model predictions.
+	//
+	// At low temperatures (<=0.3) we use a pure greedy sampler — this skips the
+	// 10-sampler default chain (TopK, TopP, MinP, Penalties, Dry, etc.) and just
+	// picks the highest-logit token, which is the fastest possible sampling
+	// strategy. For higher temperatures, fall back to the default sampler chain.
+	var sampler llama.Sampler
+	if temperature <= 0.3 {
+		sampler = llama.SamplerChainInit(llama.SamplerChainDefaultParams())
+		llama.SamplerChainAdd(sampler, llama.SamplerInitGreedy())
+	} else {
+		sp := llama.DefaultSamplerParams()
+		sp.Temp = float32(temperature)
+		sampler = llama.NewSampler(model, llama.DefaultSamplers, sp)
+	}
 	defer llama.SamplerFree(sampler)
 
 	// Get tool definitions
@@ -314,22 +359,27 @@ func renderMarkdown(text string) {
 	fmt.Println(box.Render(strings.TrimSpace(out)))
 }
 
-// generate runs token-by-token inference for up to predictSize tokens or until
-// the model emits an end-of-generation token, then returns the decoded response.
+// generate runs token-by-token inference for up to predictSize generated tokens
+// or until the model emits an end-of-generation token, then returns the decoded
+// response.
 func generate(ctx llama.Context, vocab llama.Vocab, sampler llama.Sampler, tokens []llama.Token) string {
 	var response strings.Builder
+	// Pre-allocate the piece buffer once and reuse it across iterations to avoid
+	// allocating 256 bytes of garbage per generated token.
+	buf := make([]byte, 256)
 
+	// Decode the entire prompt in one batch (prefill).
 	batch := llama.BatchGetOne(tokens)
 	llama.Decode(ctx, batch)
 
-	for pos := int32(0); pos < int32(predictSize); pos += batch.NTokens {
+	// Generation loop: iterate up to predictSize times. Each iteration samples
+	// one token, checks for EOG, decodes it, and prepares the next batch.
+	for i := 0; i < predictSize; i++ {
 		token := llama.SamplerSample(sampler, ctx, -1)
-
 		if llama.VocabIsEOG(vocab, token) {
 			break
 		}
 
-		buf := make([]byte, 256)
 		n := llama.TokenToPiece(vocab, token, buf, 0, false)
 		response.Write(buf[:n])
 
