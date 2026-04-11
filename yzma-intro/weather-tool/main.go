@@ -16,7 +16,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/hybridgroup/yzma/pkg/llama"
 	"github.com/hybridgroup/yzma/pkg/message"
-	"github.com/hybridgroup/yzma/pkg/template"
 )
 
 const (
@@ -86,7 +85,7 @@ func main() {
 	flag.IntVar(&predictSize, "n", 1024, "max tokens to predict per generation")
 	flag.Float64Var(&temperature, "temperature", 0.1, "prediction temperature")
 	flag.IntVar(&nThreads, "threads", runtime.NumCPU(), "number of threads for inference (default: all logical cores)")
-	flag.IntVar(&nBatch, "batch", 512, "logical/physical batch size for prefill (smaller is more cache-friendly on older CPUs)")
+	flag.IntVar(&nBatch, "batch", 0, "logical/physical batch size for prefill (0 = match context size, which is the safest default; smaller can be more cache-friendly but must be >= the largest single prompt or llama.cpp will abort)")
 	flag.BoolVar(&flashAttn, "flash-attn", false, "enable flash attention (may help or hurt depending on CPU; benchmark both)")
 	flag.BoolVar(&quantizeKV, "quant-kv", false, "use Q8_0 quantized KV cache (independent of model weight quant; lower KV quants would require -flash-attn)")
 	flag.BoolVar(&mlockModel, "mlock", false, "lock model weights in RAM (prevents swapping)")
@@ -95,6 +94,16 @@ func main() {
 	if libPath == "" {
 		slog.Error("Error: provide -lib flag or set YZMA_LIB environment variable")
 		os.Exit(1)
+	}
+
+	// Resolve -batch=0 to "match context size" so any prompt that fits in
+	// context can be decoded in a single batch. If the user explicitly set a
+	// smaller batch, warn — llama.cpp will abort if the prompt exceeds NBatch.
+	if nBatch <= 0 {
+		nBatch = maxTokens
+	} else if nBatch < maxTokens {
+		slog.Warn("batch size is smaller than context size; long prompts will fail",
+			"batch", nBatch, "ctx", maxTokens)
 	}
 
 	// Load llama.cpp library and initialize
@@ -156,13 +165,9 @@ func main() {
 	}
 	defer llama.Free(ctx)
 
-	// Load model vocabulary and chat template
+	// Load model vocabulary. We don't read the embedded chat template — the
+	// app uses its own renderGemmaPrompt (see prompting.go) for formatting.
 	vocab := llama.ModelGetVocab(model)
-	chatTmpl := llama.ModelChatTemplate(model, "")
-	if chatTmpl == "" {
-		slog.Error("Model has no embedded chat template")
-		os.Exit(1)
-	}
 
 	// Create sampler for model predictions.
 	//
@@ -196,7 +201,7 @@ func main() {
 	err = spinner.New().
 		Title("Getting weather info ...").
 		Action(func() {
-			if err := runConversation(ctx, vocab, sampler, chatTmpl, tools, prompt); err != nil {
+			if err := runConversation(ctx, vocab, sampler, tools, prompt); err != nil {
 				slog.Error("Conversation failed", "err", err)
 				os.Exit(1)
 			}
@@ -245,7 +250,6 @@ func runConversation(
 	ctx llama.Context,
 	vocab llama.Vocab,
 	sampler llama.Sampler,
-	chatTemplate string,
 	tools []Tool,
 	userPrompt string,
 ) error {
@@ -267,15 +271,11 @@ func runConversation(
 	maxIterations := 5
 
 	for i := range maxIterations {
-		// Apply template and generate response
-		prompt, err := template.Apply(chatTemplate, chatMessages, true)
-		if err != nil {
-			return fmt.Errorf("conversation: failed to apply template: %w", err)
-		}
-
-		if prompt == "" {
-			return fmt.Errorf("conversation: failed to apply chat template")
-		}
+		// Render the message history into a Gemma-formatted prompt string
+		// using our hand-written renderer (see prompting.go). This sidesteps
+		// gonja and llama.cpp's hard-coded template handlers entirely so the
+		// app works for every Gemma 4 variant.
+		prompt := renderGemmaPrompt(chatMessages)
 
 		if verbose {
 			fmt.Printf("\n=== Iteration %d Prompt (%d chars) ===\n%s\n===========================\n", i+1, len(prompt), prompt)
@@ -288,6 +288,10 @@ func runConversation(
 		}
 		llama.MemoryClear(mem, true)
 
+		// addSpecial=false because renderGemmaPrompt already emits <bos> as
+		// literal text; parseSpecial=true so the literal <bos>, <start_of_turn>,
+		// and <end_of_turn> in the rendered prompt get converted to their
+		// special token IDs by the tokenizer.
 		tokens := llama.Tokenize(vocab, prompt, false, true)
 		if len(tokens) == 0 {
 			return fmt.Errorf("conversation: tokenization produced no tokens")
@@ -318,9 +322,12 @@ func runConversation(
 				return fmt.Errorf("conversation tool call: %w", err)
 			}
 
+			// Feed tool errors back to the model as the tool result so it can react
+			// (e.g. politely tell the user the location wasn't found) instead of
+			// aborting the entire conversation. Matches the yzma multitool example.
 			result, err := executeToolCall(call)
 			if err != nil {
-				return fmt.Errorf("conversation tool call: %w", err)
+				result = fmt.Sprintf("Error: %v", err)
 			}
 			if verbose {
 				fmt.Printf("Tool call: %s(%s) => %s\n", call.Function.Name, string(argsJSON), result[:min(len(result), 200)])
@@ -380,6 +387,13 @@ func generate(ctx llama.Context, vocab llama.Vocab, sampler llama.Sampler, token
 			break
 		}
 
+		// special=false: skip rendering any special tokens (e.g. Gemma's
+		// <end_of_turn>, <start_of_turn>, or other control markers) that the
+		// model might emit before its true EOG token. With special=true those
+		// would leak into the response as visible "<...>" text. We rely on
+		// VocabIsEOG above to terminate generation correctly, and on the
+		// model's <tool_call> being plain text (not a special vocab entry)
+		// for tool-call parsing to still work.
 		n := llama.TokenToPiece(vocab, token, buf, 0, false)
 		response.Write(buf[:n])
 
