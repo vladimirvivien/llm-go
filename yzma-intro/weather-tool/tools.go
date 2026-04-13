@@ -42,15 +42,6 @@ func getToolDefinitions() []Tool {
 	}
 }
 
-// formatToolsForPrompt formats the tool definitions as a JSON string for the system prompt.
-func formatToolsForPrompt(tools []Tool) string {
-	toolsJSON, err := json.MarshalIndent(tools, "", "  ")
-	if err != nil {
-		return "[]"
-	}
-	return string(toolsJSON)
-}
-
 // executeToolCall executes a tool call and returns the result.
 func executeToolCall(call message.ToolCall) (string, error) {
 	switch call.Function.Name {

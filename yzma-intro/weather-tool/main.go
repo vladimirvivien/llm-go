@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -15,48 +14,6 @@ import (
 	"github.com/charmbracelet/huh/spinner"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/hybridgroup/yzma/pkg/llama"
-	"github.com/hybridgroup/yzma/pkg/message"
-)
-
-const (
-	systemPromptTemplate = `
-You are a helpful weather assistant that ONLY handles weather requests 
-for US territories (the 50 states, DC, Puerto Rico, US Virgin Islands, Guam, 
-American Samoa, and Northern Mariana Islands). If the user asks about 
-a non-US location, politely let them know that this application only supports 
-weather forecasts for US territories. If the user asks something unrelated to 
-weather, politely let them know that this application only handles weather requests. 
-Do NOT call the get_weather tool for non-US locations. For valid US weather requests, 
-use the get_weather tool to fetch real forecast data, then provide a clear, 
-well-formatted summary. 
-
-**Format your response in Markdown** with sections for current 
-conditions and upcoming forecast periods. Use weather related emojis to help convey
-conditions:
-
-* Use ☀️ - for sunny forcast
-* Use 🌤️ - for partial sunny condition
-* Use 🌦️ - for sunny followed by rainy conditions
-* Use ☁️ - for cloudy no rain conditions 
-* Use 🌧️ - for mostly cloudy with possible rain conditions
-* Use ⛈️ - for cloudy, rainy, with possible thunderstorm conditions
-* Use 🌩️ - for cloudy, rainy, and lightning conditions
-* Use 🌨️ - for cloudy and snow conditions
-* Use 🌪️ - for possible tornadoes
-
-	
-You have access to the following tools:
-
-%s
-
-When you need to use a tool, respond with a tool call in the following format:
-<tool_call>
-{"name": "function_name", "arguments": {"arg1": "value1"}}
-</tool_call>
-
-After receiving tool results, provide a final answer to the user. 
-DO NOT include tool calls in your final answer.
-`
 )
 
 var (
@@ -241,11 +198,6 @@ func createForm() (string, error) {
 	return prompt, nil
 }
 
-// Return system prompt
-func getSystemPrompt(toolSpec string) string {
-	return fmt.Sprintf(systemPromptTemplate, toolSpec)
-}
-
 func runConversation(
 	ctx llama.Context,
 	vocab llama.Vocab,
@@ -253,101 +205,76 @@ func runConversation(
 	tools []Tool,
 	userPrompt string,
 ) error {
-	toolsJSON := formatToolsForPrompt(tools)
-	systemPrompt := getSystemPrompt(toolsJSON)
+	systemPrompt := getSystemPrompt()
+	toolDeclarations := renderToolDeclarations(tools)
 
-	// Initialize messages with system prompt and user question
-	chatMessages := []message.Message{
-		message.Chat{
-			Role:    "system",
-			Content: systemPrompt,
-		},
-		message.Chat{
-			Role:    "user",
-			Content: userPrompt,
-		},
+	// Pass 1: generate with initial prompt (system + user + open model turn)
+	prompt := renderGemmaPrompt(systemPrompt, toolDeclarations, userPrompt)
+	if verbose {
+		fmt.Printf("\n=== Pass 1 Prompt (%d chars) ===\n%s\n===========================\n", len(prompt), prompt)
+	}
+	response := generateFromPrompt(ctx, vocab, sampler, prompt)
+	if verbose {
+		fmt.Printf("\n=== Pass 1 Response ===\n%s\n=============================\n", response)
 	}
 
-	maxIterations := 5
+	// Parse native Gemma 4 tool call: <|tool_call>call:name{args}<tool_call|>
+	call, found := parseGemma4ToolCall(response)
 
-	for i := range maxIterations {
-		// Render the message history into a Gemma-formatted prompt string
-		// using our hand-written renderer (see prompting.go). This sidesteps
-		// gonja and llama.cpp's hard-coded template handlers entirely so the
-		// app works for every Gemma 4 variant.
-		prompt := renderGemmaPrompt(chatMessages)
-
-		if verbose {
-			fmt.Printf("\n=== Iteration %d Prompt (%d chars) ===\n%s\n===========================\n", i+1, len(prompt), prompt)
+	// No tool call — model answered directly. Render and return.
+	if !found {
+		if strings.Contains(response, "<|tool_call>") {
+			return fmt.Errorf("model emitted a tool call but parsing failed: %s", response)
 		}
-
-		// Clear KV cache before each full-prompt generation
-		mem, err := llama.GetMemory(ctx)
-		if err != nil {
-			return fmt.Errorf("conversation: KV cache error: %w", err)
-		}
-		llama.MemoryClear(mem, true)
-
-		// addSpecial=false because renderGemmaPrompt already emits <bos> as
-		// literal text; parseSpecial=true so the literal <bos>, <start_of_turn>,
-		// and <end_of_turn> in the rendered prompt get converted to their
-		// special token IDs by the tokenizer.
-		tokens := llama.Tokenize(vocab, prompt, false, true)
-		if len(tokens) == 0 {
-			return fmt.Errorf("conversation: tokenization produced no tokens")
-		}
-		if verbose {
-			fmt.Printf("Token count: %d\n", len(tokens))
-		}
-
-		// Generate prompt response
-		response := generate(ctx, vocab, sampler, tokens)
-
-		if verbose {
-			fmt.Printf("\n=== Iteration %d Response ===\n%s\n=============================\n", i+1, response)
-		}
-
-		toolCalls := message.ParseToolCalls(response)
-
-		// No tool calls — this is the final answer.
-		if len(toolCalls) == 0 {
-			renderMarkdown(response)
-			return nil
-		}
-
-		// Process tool calls found
-		for _, call := range toolCalls {
-			argsJSON, err := json.Marshal(call.Function.Arguments)
-			if err != nil {
-				return fmt.Errorf("conversation tool call: %w", err)
-			}
-
-			// Feed tool errors back to the model as the tool result so it can react
-			// (e.g. politely tell the user the location wasn't found) instead of
-			// aborting the entire conversation. Matches the yzma multitool example.
-			result, err := executeToolCall(call)
-			if err != nil {
-				result = fmt.Sprintf("Error: %v", err)
-			}
-			if verbose {
-				fmt.Printf("Tool call: %s(%s) => %s\n", call.Function.Name, string(argsJSON), result[:min(len(result), 200)])
-			}
-
-			// Add tool call and response to messages
-			chatMessages = append(chatMessages, message.Tool{
-				Role:      "assistant",
-				ToolCalls: []message.ToolCall{call},
-			})
-			chatMessages = append(chatMessages, message.ToolResponse{
-				Role:    "tool",
-				Name:    call.Function.Name,
-				Content: result,
-			})
-		}
-
+		renderMarkdown(response)
+		return nil
 	}
-	slog.Warn("Maximum tool-call iterations reached without final answer", "max", maxIterations)
+
+	// Execute the tool call
+	result, err := executeToolCall(call)
+	if err != nil {
+		result = fmt.Sprintf("Error: %v", err)
+	}
+	if verbose {
+		fmt.Printf("Tool call: %s(%v) => %s\n", call.Function.Name, call.Function.Arguments, result[:min(len(result), 200)])
+	}
+
+	// Use the model's raw response as the tool call text for pass 2,
+	// and format the tool response in Gemma 4 native tokens.
+	toolCallText := strings.TrimSpace(response)
+	toolResponseText := fmt.Sprintf(
+		"<|tool_response>response:%s{%s}<tool_response|>\n",
+		call.Function.Name, result)
+
+	// Pass 2: generate with tool result injected into the same model turn
+	prompt = renderGemmaPromptWithToolResult(
+		systemPrompt, toolDeclarations, userPrompt,
+		toolCallText, toolResponseText)
+	if verbose {
+		fmt.Printf("\n=== Pass 2 Prompt (%d chars) ===\n%s\n===========================\n", len(prompt), prompt)
+	}
+	response = generateFromPrompt(ctx, vocab, sampler, prompt)
+	if verbose {
+		fmt.Printf("\n=== Pass 2 Response ===\n%s\n=============================\n", response)
+	}
+
+	renderMarkdown(response)
 	return nil
+}
+
+// generateFromPrompt clears the KV cache, tokenizes a prompt, and runs
+// inference. Wraps the clear → tokenize → generate sequence that both
+// passes of runConversation need.
+func generateFromPrompt(ctx llama.Context, vocab llama.Vocab, sampler llama.Sampler, prompt string) string {
+	mem, _ := llama.GetMemory(ctx)
+	llama.MemoryClear(mem, true)
+
+	// addSpecial=true lets the tokenizer prepend BOS if the model's
+	// metadata requires it; parseSpecial=true converts the literal
+	// Gemma 4 control tokens (<|turn>, <turn|>, <|tool>, etc.) in our
+	// rendered prompt into their special token IDs.
+	tokens := llama.Tokenize(vocab, prompt, true, true)
+	return generate(ctx, vocab, sampler, tokens)
 }
 
 // renderMarkdown renders a response string as styled Markdown in a bordered box.
