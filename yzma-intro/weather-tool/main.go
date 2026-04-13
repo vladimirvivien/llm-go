@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/huh"
@@ -20,14 +20,9 @@ var (
 	modelFile   string
 	libPath     string
 	verbose     bool
-	maxTokens   int
-	predictSize int
 	temperature float64
-	nThreads    int
-	nBatch      int
-	flashAttn   bool
-	quantizeKV  bool
-	mlockModel  bool
+	predictSize int
+	promptFlag  string
 )
 
 func main() {
@@ -38,29 +33,14 @@ func main() {
 	flag.StringVar(&modelFile, "model", defaultModel, "path to GGUF model file")
 	flag.StringVar(&libPath, "lib", os.Getenv("YZMA_LIB"), "path to llama.cpp compiled library (or set YZMA_LIB)")
 	flag.BoolVar(&verbose, "v", false, "verbose logging")
-	flag.IntVar(&maxTokens, "max-tokens", 3072, "max tokens in context")
+	flag.Float64Var(&temperature, "temperature", 0.5, "prediction temperature")
 	flag.IntVar(&predictSize, "n", 1024, "max tokens to predict per generation")
-	flag.Float64Var(&temperature, "temperature", 0.1, "prediction temperature")
-	flag.IntVar(&nThreads, "threads", runtime.NumCPU(), "number of threads for inference (default: all logical cores)")
-	flag.IntVar(&nBatch, "batch", 0, "logical/physical batch size for prefill (0 = match context size, which is the safest default; smaller can be more cache-friendly but must be >= the largest single prompt or llama.cpp will abort)")
-	flag.BoolVar(&flashAttn, "flash-attn", false, "enable flash attention (may help or hurt depending on CPU; benchmark both)")
-	flag.BoolVar(&quantizeKV, "quant-kv", false, "use Q8_0 quantized KV cache (independent of model weight quant; lower KV quants would require -flash-attn)")
-	flag.BoolVar(&mlockModel, "mlock", false, "lock model weights in RAM (prevents swapping)")
+	flag.StringVar(&promptFlag, "prompt", "", "prompt to use directly (skip the TUI form)")
 	flag.Parse()
 
 	if libPath == "" {
 		slog.Error("Error: provide -lib flag or set YZMA_LIB environment variable")
 		os.Exit(1)
-	}
-
-	// Resolve -batch=0 to "match context size" so any prompt that fits in
-	// context can be decoded in a single batch. If the user explicitly set a
-	// smaller batch, warn — llama.cpp will abort if the prompt exceeds NBatch.
-	if nBatch <= 0 {
-		nBatch = maxTokens
-	} else if nBatch < maxTokens {
-		slog.Warn("batch size is smaller than context size; long prompts will fail",
-			"batch", nBatch, "ctx", maxTokens)
 	}
 
 	// Load llama.cpp library and initialize
@@ -78,42 +58,22 @@ func main() {
 	defer llama.Close()
 
 	// Load model from model file
-	mParams := llama.ModelDefaultParams()
-	if mlockModel {
-		mParams.UseMlock = 1
-	}
-	model, err := llama.ModelLoadFromFile(modelFile, mParams)
+	loadStart := time.Now()
+	model, err := llama.ModelLoadFromFile(modelFile, llama.ModelDefaultParams())
 	if err != nil {
 		slog.Error("Failed to load model", "err", err)
 		os.Exit(1)
 	}
 	defer llama.ModelFree(model)
+	slog.Info("model loaded", "model", modelFile, "elapsed", time.Since(loadStart).Round(time.Millisecond))
 
-	// Create context with performance tuning
+	// Create inference context. Set explicit NCtx and match NBatch/NUbatch
+	// to it so any prompt that fits in context can be decoded in a single
+	// batch — llama.cpp asserts if the prompt exceeds NBatch.
 	ctxParams := llama.ContextDefaultParams()
-	ctxParams.NCtx = uint32(maxTokens)
-	ctxParams.NBatch = uint32(nBatch)
-	ctxParams.NUbatch = uint32(nBatch)
-	ctxParams.NThreads = int32(nThreads)
-	ctxParams.NThreadsBatch = int32(nThreads)
-	if flashAttn {
-		ctxParams.FlashAttentionType = llama.FlashAttentionTypeEnabled
-	}
-	if quantizeKV {
-		ctxParams.TypeK = llama.GGMLTypeQ8_0
-		ctxParams.TypeV = llama.GGMLTypeQ8_0
-	}
-
-	// Log effective inference configuration so the user can verify what's actually
-	// loaded and tune via flags. The full model file path is included so it's
-	// unambiguous which GGUF quantization is being loaded.
-	slog.Info("inference config",
-		"model", modelFile,
-		"threads", nThreads,
-		"batch", ctxParams.NBatch,
-		"ctx", ctxParams.NCtx,
-		"flash_attn", flashAttn,
-		"quant_kv", quantizeKV)
+	ctxParams.NCtx = 4096
+	ctxParams.NBatch = ctxParams.NCtx
+	ctxParams.NUbatch = ctxParams.NCtx
 
 	ctx, err := llama.InitFromModel(model, ctxParams)
 	if err != nil {
@@ -127,32 +87,29 @@ func main() {
 	vocab := llama.ModelGetVocab(model)
 
 	// Create sampler for model predictions.
-	//
-	// At low temperatures (<=0.3) we use a pure greedy sampler — this skips the
-	// 10-sampler default chain (TopK, TopP, MinP, Penalties, Dry, etc.) and just
-	// picks the highest-logit token, which is the fastest possible sampling
-	// strategy. For higher temperatures, fall back to the default sampler chain.
-	var sampler llama.Sampler
-	if temperature <= 0.3 {
-		sampler = llama.SamplerChainInit(llama.SamplerChainDefaultParams())
-		llama.SamplerChainAdd(sampler, llama.SamplerInitGreedy())
-	} else {
-		sp := llama.DefaultSamplerParams()
-		sp.Temp = float32(temperature)
-		sampler = llama.NewSampler(model, llama.DefaultSamplers, sp)
-	}
+	sp := llama.DefaultSamplerParams()
+	sp.Temp = float32(temperature)
+	sampler := llama.NewSampler(model, llama.DefaultSamplers, sp)
+
 	defer llama.SamplerFree(sampler)
 
 	// Get tool definitions
 	tools := getToolDefinitions()
 
-	prompt, err := createForm()
-	if err != nil {
-		slog.Error("Failed to get user prompt", "err", err)
-		os.Exit(1)
+	// Get user prompt: from -prompt flag (for scripting/benchmarking) or
+	// from the TUI form (interactive use).
+	var prompt string
+	if promptFlag != "" {
+		prompt = promptFlag
+	} else {
+		var err error
+		prompt, err = createForm()
+		if err != nil {
+			slog.Error("Failed to get user prompt", "err", err)
+			os.Exit(1)
+		}
 	}
 
-	// Re-print the user's query so it stays visible after the form clears
 	fmt.Printf("Asking: %s\n\n", prompt)
 
 	err = spinner.New().
@@ -164,7 +121,7 @@ func main() {
 			}
 		}).Run()
 	if err != nil {
-		slog.Error("Spinner errorv", "err", err)
+		slog.Error("Spinner error", "err", err)
 	}
 }
 
