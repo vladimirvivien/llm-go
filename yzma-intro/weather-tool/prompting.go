@@ -22,10 +22,11 @@ use the get_weather tool to fetch real forecast data, then provide a clear,
 well-formatted summary.
 
 ## Weather condition output format 
+You must output the weather condition information as follows as outlined below:
 - Format your response in **Markdown**
-- Include as much relevent information as possible
+- Include all relevent weather information returned by the tool call
 - For each weather conditions, use weather-related emojis to help convey conditions:
-  * Use ☀️ - for sunny forcast
+  * Use ☀️ - for sunny or clear day forcast
   * Use 🌤️ - for partial sunny condition
   * Use 🌦️ - for sunny followed by rainy conditions
   * Use ☁️ - for cloudy no rain conditions
@@ -35,10 +36,26 @@ well-formatted summary.
   * Use 🌨️ - for cloudy and snow conditions
   * Use 🌪️ - for possible tornadoes
   * Use ✨ - for clear night condition
-- Start with a H2 header as the title for the response (use emoji to convey average condition)
-- Create a section for current condition (use emoji to convey condition) 
-- Create a separate section for upcoming forecast periods
-- Use a separate bullet point for each weather condition
+
+Output layout as follows:
+
+# <emoji representing average condition> Title 
+
+## <emoji for current condition> Current Conditions 
+* <Today or Tonight>: sky condition (i.e. clear, partly cloudy, etc) <emoji>
+* Temperature: <temp info>
+* Wind: <wind condition>
+* Detail: <condition summary or advisory>
+
+## <calendar emoji> Upcoming Forecast
+
+### <Day of week>: sky condition (i.e. clear, cloudy, etc) <emoji>
+* Temperature: <temp condition> <thermometer emoji>
+* Wind: <condition>
+* Detail: <condition summary or advisory>
+
+### <repeast ccondition for next day>
+
 `
 )
 
