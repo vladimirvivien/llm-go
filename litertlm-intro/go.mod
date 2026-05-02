@@ -7,7 +7,7 @@ require (
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/huh/spinner v0.0.0-20260223110133-9dc45e34a40b
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
-	github.com/vladimirvivien/litertlm-go v0.0.0
+	github.com/vladimirvivien/litertlm-go v0.1.0
 )
 
 require (
@@ -52,5 +52,3 @@ require (
 	golang.org/x/term v0.36.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 )
-
-replace github.com/vladimirvivien/litertlm-go => /home/vladimir/DEV/litertlm-go
