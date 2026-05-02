@@ -47,7 +47,7 @@ func main() {
 
 	flag.StringVar(&modelFile, "model", defaultModel, "path to .litertlm model file")
 	flag.StringVar(&libPath, "lib", envOr("LITERTLM_LIB", defaultLib), "directory holding the LiteRT-LM shared libraries")
-	flag.StringVar(&backend, "backend", "cpu", "inference backend (cpu | gpu)")
+	flag.StringVar(&backend, "backend", envOr("LITERTLM_BACKEND", "cpu"), "inference backend (cpu | gpu)")
 	flag.BoolVar(&verbose, "v", false, "verbose logging")
 	flag.Float64Var(&temperature, "temperature", 0.5, "prediction temperature (0 = greedy)")
 	flag.IntVar(&engineMaxTokens, "max", 4096, "max total tokens for the engine (prompt + output)")
