@@ -1,0 +1,11 @@
+drug_name,on_formulary,requires_pa,step_therapy
+metformin,1,0,
+atorvastatin,1,0,
+lisinopril,1,0,
+amoxicillin,1,0,
+omeprazole,1,0,
+adalimumab,0,1,"methotrexate,sulfasalazine"
+ozempic,1,1,"metformin"
+wegovy,0,1,"metformin,phentermine"
+secukinumab,0,1,"methotrexate,adalimumab"
+tirzepatide,0,1,"metformin,ozempic"

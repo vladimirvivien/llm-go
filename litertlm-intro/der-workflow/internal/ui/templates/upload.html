@@ -1,0 +1,15 @@
+{{define "content"}}
+<h1 class="text-2xl font-bold mb-6">Upload form</h1>
+<section class="bg-white rounded-lg shadow p-6 max-w-xl">
+  <form method="post" action="/upload" enctype="multipart/form-data" class="space-y-4">
+    <div>
+      <label class="block text-sm font-medium mb-1">Form image (PNG / JPG)</label>
+      <input type="file" name="file" accept="image/*" required class="block w-full text-sm">
+    </div>
+    <button class="px-4 py-2 bg-slate-900 text-white rounded">Submit</button>
+  </form>
+  {{if .Message}}
+  <p class="mt-4 text-sm text-emerald-700">{{.Message}}</p>
+  {{end}}
+</section>
+{{end}}

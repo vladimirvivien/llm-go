@@ -6,29 +6,26 @@ import (
 	"github.com/vladimirvivien/litertlm-go/pkg/litertlm"
 )
 
-// getToolDefinitions declares the get_weather tool in the OpenAI /
-// Anthropic function-calling schema. The Chat API renders this into
-// the model's native tool-declaration format internally.
-func getToolDefinitions() []litertlm.Tool {
-	return []litertlm.Tool{
-		{
-			Type: "function",
-			Function: litertlm.ToolFunction{
-				Name:        "get_weather",
-				Description: "Get the weather forecast for a US location by city and state name",
-				Parameters: map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"location": map[string]any{
-							"type":        "string",
-							"description": "City and state to get weather for, e.g. 'Washington, DC'",
-						},
-					},
-					"required": []string{"location"},
+// getWeatherTool declares the get_weather tool with NewRawTool. The
+// parameters map is the OpenAI / Anthropic function-calling schema,
+// hand-built. The Chat API renders this into the model's native
+// tool-declaration format internally; dispatch is manual, via
+// Reply.ToolCalls() + Chat.SendToolResult.
+func getWeatherTool() *litertlm.RawTool {
+	return litertlm.NewRawTool(
+		"get_weather",
+		"Get the weather forecast for a US location by city and state name",
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"location": map[string]any{
+					"type":        "string",
+					"description": "City and state to get weather for, e.g. 'Washington, DC'",
 				},
 			},
+			"required": []string{"location"},
 		},
-	}
+	)
 }
 
 // executeToolCall dispatches a model-emitted tool call. The return

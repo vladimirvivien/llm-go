@@ -11,13 +11,11 @@ import (
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
-// Forecast encapsulates the weather lookup and holds forecast results.
 type Forecast struct {
 	Location string           `json:"location"`
 	Periods  []ForecastPeriod `json:"periods"`
 }
 
-// ForecastPeriod represents a single forecast time period from the NWS API.
 type ForecastPeriod struct {
 	Name             string `json:"name"`
 	Temperature      int    `json:"temperature"`
@@ -28,14 +26,12 @@ type ForecastPeriod struct {
 	DetailedForecast string `json:"detailedForecast"`
 }
 
-// NWSGridPoint represents the resolved grid point from the NWS API.
 type NWSGridPoint struct {
 	ForecastURL string `json:"forecast"`
 	City        string `json:"city"`
 	State       string `json:"state"`
 }
 
-// GetForecast geocodes a location name, then fetches the NWS forecast.
 func GetForecast(location string) (*Forecast, error) {
 	lat, lon, err := geocode(location)
 	if err != nil {
@@ -58,7 +54,6 @@ func GetForecast(location string) (*Forecast, error) {
 	}, nil
 }
 
-// geocode resolves a location name to latitude/longitude using Nominatim.
 func geocode(location string) (lat, lon float64, err error) {
 	u := fmt.Sprintf(
 		"https://nominatim.openstreetmap.org/search?q=%s&format=jsonv2&limit=1",
@@ -69,7 +64,7 @@ func geocode(location string) (lat, lon float64, err error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	req.Header.Set("User-Agent", "litertlm-weather-tool/1.0")
+	req.Header.Set("User-Agent", "litertlm-weather-autotool/1.0")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -102,7 +97,6 @@ func geocode(location string) (lat, lon float64, err error) {
 	return latF, lonF, nil
 }
 
-// getGridPoint resolves lat/lon to a NWS grid point.
 func getGridPoint(lat, lon float64) (*NWSGridPoint, error) {
 	u := fmt.Sprintf("https://api.weather.gov/points/%.4f,%.4f", lat, lon)
 
@@ -110,7 +104,7 @@ func getGridPoint(lat, lon float64) (*NWSGridPoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "litertlm-weather-tool/1.0")
+	req.Header.Set("User-Agent", "litertlm-weather-autotool/1.0")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -144,13 +138,12 @@ func getGridPoint(lat, lon float64) (*NWSGridPoint, error) {
 	}, nil
 }
 
-// getForecast fetches forecast periods from a NWS forecast URL.
 func getForecast(forecastURL string) ([]ForecastPeriod, error) {
 	req, err := http.NewRequest("GET", forecastURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "litertlm-weather-tool/1.0")
+	req.Header.Set("User-Agent", "litertlm-weather-autotool/1.0")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {

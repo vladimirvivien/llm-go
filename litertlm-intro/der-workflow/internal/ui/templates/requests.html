@@ -1,0 +1,48 @@
+{{define "content"}}
+<h1 class="text-2xl font-bold mb-6">Requests</h1>
+<form class="flex flex-wrap gap-3 mb-4 text-sm">
+  <select name="status" class="border rounded px-2 py-1" onchange="this.form.submit()">
+    <option value="">all statuses</option>
+    {{range .Statuses}}<option value="{{.}}" {{if eq . $.Filter.Status}}selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <select name="lane" class="border rounded px-2 py-1" onchange="this.form.submit()">
+    <option value="">all lanes</option>
+    {{range .Lanes}}<option value="{{.}}" {{if eq . $.Filter.Lane}}selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <noscript><button class="px-3 py-1 bg-slate-700 text-white rounded">filter</button></noscript>
+</form>
+<section class="bg-white rounded-lg shadow p-4">
+  {{template "request-table" .Requests}}
+</section>
+{{end}}
+
+{{define "request-table"}}
+<table class="w-full text-sm">
+  <thead class="text-left text-slate-500 border-b">
+    <tr>
+      <th class="py-2">request</th>
+      <th>filename</th>
+      <th>source</th>
+      <th>status</th>
+      <th>lane</th>
+      <th>score</th>
+      <th>updated</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .}}
+    <tr class="border-b last:border-0 hover:bg-slate-50">
+      <td class="py-2"><a class="text-blue-600 hover:underline font-mono text-xs" href="/requests/{{.ID}}">{{slice .ID 0 8}}</a></td>
+      <td>{{.Filename}}</td>
+      <td><span class="text-xs uppercase tracking-wide text-slate-500">{{.Source}}</span></td>
+      <td><span class="px-2 py-0.5 rounded text-xs {{statusClass .Status}}">{{.Status}}</span></td>
+      <td>{{if .ReviewLane}}<span class="px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">{{.ReviewLane}}</span>{{end}}</td>
+      <td class="font-mono">{{if .Score.Valid}}{{.Score.Int64}}{{end}}</td>
+      <td class="text-slate-500">{{.UpdatedAt.Format "2006-01-02 15:04:05"}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="7" class="py-3 text-slate-500 text-center">no requests yet</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

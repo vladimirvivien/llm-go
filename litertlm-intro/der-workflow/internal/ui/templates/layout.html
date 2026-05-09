@@ -1,0 +1,32 @@
+{{define "layout"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Drug Exception Workflow</title>
+<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: ui-sans-serif, system-ui, sans-serif; }
+  .stage-pass { background: #dcfce7; color: #166534; }
+  .stage-fail { background: #fee2e2; color: #991b1b; }
+  .stage-route { background: #fef3c7; color: #92400e; }
+  pre.snippet { white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800">
+<header class="bg-slate-900 text-slate-50 border-b border-slate-800">
+  <div class="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+    <a href="/" class="text-lg font-semibold">Drug Exception Workflow</a>
+    <nav class="flex gap-4 text-sm">
+      <a class="hover:text-amber-300" href="/">Dashboard</a>
+      <a class="hover:text-amber-300" href="/requests">Requests</a>
+      <a class="hover:text-amber-300" href="/queues">Review Queues</a>
+      <a class="hover:text-amber-300" href="/upload">Upload</a>
+    </nav>
+  </div>
+</header>
+<main class="max-w-6xl mx-auto px-4 py-6">
+  {{template "content" .}}
+</main>
+</body>
+</html>{{end}}

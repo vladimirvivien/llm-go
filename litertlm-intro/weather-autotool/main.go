@@ -1,20 +1,12 @@
-// weather-tool-chat is a high-level twin of ../weather-tool. Same demo
-// (US weather Q&A backed by the National Weather Service), but built
-// on litertlm-go's Chat API:
-//
-//   - tools are declared as []litertlm.Tool (OpenAI-style schema),
-//   - the chat template renders the model's native tool-declaration
-//     syntax for us,
-//   - the model's tool call comes back as a structured *Reply, and
-//   - the result is fed back via Chat.SendToolResult.
-//
-// No hand-rolled <|tool_call> parser, no Gemma 4 native-token wrangling.
-// Compare main.go here with ../weather-tool/main.go + prompting.go to
-// see what the higher-level API absorbs.
+// weather-autotool is the auto-dispatch twin of weather-tool-chat. The
+// get_weather tool is registered with litertlm.RegisterTool; the
+// framework dispatches it when the model invokes it and returns the
+// post-tool natural-language answer in a single Chat.Send call.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -37,6 +29,7 @@ var (
 	verbose         bool
 	temperature     float64
 	engineMaxTokens int
+	maxToolHops     int
 	promptFlag      string
 )
 
@@ -51,6 +44,7 @@ func main() {
 	flag.BoolVar(&verbose, "v", false, "verbose logging")
 	flag.Float64Var(&temperature, "temperature", 0.5, "prediction temperature (0 = greedy)")
 	flag.IntVar(&engineMaxTokens, "max", 4096, "max total tokens for the engine (prompt + output)")
+	flag.IntVar(&maxToolHops, "max-hops", 4, "max tool-call round-trips per Send")
 	flag.StringVar(&promptFlag, "prompt", "", "prompt to use directly (skip the TUI form)")
 	flag.Parse()
 
@@ -82,11 +76,16 @@ func main() {
 	defer func() { _ = client.Close() }()
 	slog.Info("model loaded", "model", modelFile, "elapsed", time.Since(loadStart).Round(time.Millisecond))
 
+	weather, err := registerWeatherTool(client)
+	if err != nil {
+		slog.Error("failed to register weather tool", "err", err)
+		os.Exit(1)
+	}
+
 	var prompt string
 	if promptFlag != "" {
 		prompt = promptFlag
 	} else {
-		var err error
 		prompt, err = createForm()
 		if err != nil {
 			slog.Error("failed to get user prompt", "err", err)
@@ -99,7 +98,7 @@ func main() {
 	err = spinner.New().
 		Title("Getting weather info ...").
 		Action(func() {
-			if err := runChat(ctx, client, prompt); err != nil {
+			if err := runChat(ctx, client, weather, prompt); err != nil {
 				slog.Error("chat failed", "err", err)
 				os.Exit(1)
 			}
@@ -109,14 +108,13 @@ func main() {
 	}
 }
 
-// createForm shows a TUI form to collect the user's weather question.
 func createForm() (string, error) {
 	var prompt string
 
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewNote().
-				Title("US Weather Forecast (Gemma 4 + LiteRT-LM Chat API + NWS)").
+				Title("US Weather Forecast (Gemma 4 + LiteRT-LM Auto-Dispatch + NWS)").
 				Description("Ask about the weather for any US territory (Ctrl+C to cancel)"),
 
 			huh.NewInput().
@@ -138,96 +136,38 @@ func createForm() (string, error) {
 	return prompt, nil
 }
 
-// runChat drives the tool-using flow on the high-level Chat API:
-//
-//  1. Open a Chat with system prompt + tool declarations.
-//  2. Send the user message; if the reply has a tool_call, execute it
-//     and SendToolResult back. The Chat preserves history internally,
-//     so the second turn already sees the user message and the model's
-//     prior tool_call.
-//  3. Render the final natural-language answer as styled Markdown.
-//
-// Per-phase wall-clock times are printed so the caller can see where
-// time is spent (model passes vs. NWS HTTP).
-func runChat(ctx context.Context, client *litertlm.Client, userPrompt string) error {
+func runChat(ctx context.Context, client *litertlm.Client, weather litertlm.ToolDefinition, userPrompt string) error {
 	chat, err := client.NewChat(ctx,
 		litertlm.WithSystemPrompt(getSystemPrompt()),
-		litertlm.WithTool(getWeatherTool()),
+		litertlm.WithTool(weather),
+		litertlm.WithMaxToolHops(maxToolHops),
 	)
 	if err != nil {
 		return fmt.Errorf("new chat: %w", err)
 	}
 	defer func() { _ = chat.Close() }()
 
-	pass1Start := time.Now()
+	start := time.Now()
 	reply, err := chat.Send(ctx, userPrompt)
-	pass1Dur := time.Since(pass1Start)
+	dur := time.Since(start)
 	if err != nil {
-		return fmt.Errorf("pass 1 send: %w", err)
+		var hops *litertlm.ToolHopsError
+		if errors.As(err, &hops) {
+			return fmt.Errorf("tool hop cap exceeded after %d iterations; last reply: %s", hops.Hops, hops.LastReply.Raw())
+		}
+		return fmt.Errorf("send: %w", err)
 	}
+
 	if verbose {
-		fmt.Printf("\n=== Pass 1 Reply ===\n%s\n=============================\n", reply.Raw())
+		fmt.Printf("\n=== Final Reply ===\n%s\n=============================\n", reply.Raw())
 	}
 
-	if !reply.HasToolCalls() {
-		// Model answered directly (e.g. politely declined a non-US
-		// request). No tool dispatch needed.
-		renderMarkdown(reply.Text())
-		printTimings(pass1Dur, 0, 0)
-		return nil
-	}
-
-	call := reply.ToolCalls()[0]
-	if verbose {
-		fmt.Printf("Tool call: %s(%v)\n", call.Function.Name, call.Function.Arguments)
-	}
-
-	toolStart := time.Now()
-	result, err := executeToolCall(call)
-	toolDur := time.Since(toolStart)
-	if err != nil {
-		// Surface the error back to the model so it can apologise.
-		result = map[string]string{"error": err.Error()}
-	}
-	if verbose {
-		fmt.Printf("Tool result: %v\n", truncate(fmt.Sprintf("%v", result), 200))
-	}
-
-	pass2Start := time.Now()
-	final, err := chat.SendToolResult(ctx, call.Function.Name, result)
-	pass2Dur := time.Since(pass2Start)
-	if err != nil {
-		return fmt.Errorf("pass 2 send tool result: %w", err)
-	}
-	if verbose {
-		fmt.Printf("\n=== Pass 2 Reply ===\n%s\n=============================\n", final.Raw())
-	}
-
-	renderMarkdown(final.Text())
-	printTimings(pass1Dur, toolDur, pass2Dur)
+	renderMarkdown(reply.Text())
+	fmt.Println()
+	fmt.Printf("Total wall-clock: %s\n", dur.Round(time.Millisecond))
 	return nil
 }
 
-// printTimings writes a short per-phase wall-clock breakdown so users
-// can see where the run spent its time. Zero durations (e.g. when the
-// model answered without invoking a tool) are reported as "n/a".
-func printTimings(pass1, tool, pass2 time.Duration) {
-	round := func(d time.Duration) string {
-		if d == 0 {
-			return "n/a"
-		}
-		return d.Round(time.Millisecond).String()
-	}
-	total := pass1 + tool + pass2
-	fmt.Println()
-	fmt.Println("Timings:")
-	fmt.Printf("  pass 1 (model): %s\n", round(pass1))
-	fmt.Printf("  tool   (NWS):   %s\n", round(tool))
-	fmt.Printf("  pass 2 (model): %s\n", round(pass2))
-	fmt.Printf("  total:          %s\n", total.Round(time.Millisecond))
-}
-
-// renderMarkdown renders a response string as styled Markdown in a bordered box.
 func renderMarkdown(text string) {
 	out, err := glamour.Render(text, "dark")
 	if err != nil {
@@ -248,11 +188,4 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

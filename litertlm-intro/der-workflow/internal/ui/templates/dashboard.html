@@ -1,0 +1,42 @@
+{{define "content"}}
+<h1 class="text-2xl font-bold mb-6">Dashboard</h1>
+
+<div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+  {{range .Cards}}
+  <div class="bg-white rounded-lg shadow p-4">
+    <div class="text-xs uppercase tracking-wide text-slate-500">{{.Label}}</div>
+    <div class="text-3xl font-bold mt-1">{{.Value}}</div>
+    {{if .Sub}}<div class="text-xs text-slate-500 mt-1">{{.Sub}}</div>{{end}}
+  </div>
+  {{end}}
+</div>
+
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+  <section class="bg-white rounded-lg shadow p-4">
+    <h2 class="font-semibold mb-3">By status</h2>
+    <table class="w-full text-sm">
+      {{range $k, $v := .ByStatus}}
+      <tr><td class="py-1">{{$k}}</td><td class="text-right font-mono">{{$v}}</td></tr>
+      {{end}}
+    </table>
+  </section>
+  <section class="bg-white rounded-lg shadow p-4">
+    <h2 class="font-semibold mb-3">By review lane</h2>
+    <table class="w-full text-sm">
+      {{range $k, $v := .ByLane}}
+      <tr><td class="py-1">{{$k}}</td><td class="text-right font-mono">{{$v}}</td></tr>
+      {{else}}
+      <tr><td class="py-1 text-slate-500" colspan="2">no requests pending review</td></tr>
+      {{end}}
+    </table>
+  </section>
+</div>
+
+<section class="bg-white rounded-lg shadow p-4 mt-6">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="font-semibold">Recent requests</h2>
+    <a href="/requests" class="text-sm text-blue-600 hover:underline">view all</a>
+  </div>
+  {{template "request-table" .Recent}}
+</section>
+{{end}}
